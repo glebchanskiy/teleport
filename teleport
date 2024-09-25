@@ -1,0 +1,180 @@
+#!/bin/bash
+
+set -euo pipefail
+
+CONFIG_FILE="$HOME/.teleport_hosts"
+
+usage() {
+  echo "Usage: teleport <source_directory> to <destination> in <remote_directory>"
+  exit 1
+}
+
+error() {
+  echo "Error: $1"
+  exit 1
+}
+
+check_rsync() {
+  if ! command -v rsync &> /dev/null; then
+    error "rsync could not be found. Please install rsync to use this script."
+  fi
+}
+
+validate_input() {
+  if [[ "$#" -ne 5 ]]; then
+    usage
+  fi
+
+  if [[ ! -e "$1" ]]; then
+    error "Source directory '$1' does not exist."
+  fi
+
+  if [[ "$2" != "to" ]]; then
+    error "Syntax error. Missing 'to'."
+  fi
+
+  if [[ "$4" != "in" ]]; then
+    error "Syntax error. Missing 'in'."
+  fi
+}
+
+resolve_alias() {
+  local alias="$1"
+  
+  if [[ -f "$CONFIG_FILE" ]]; then
+    local resolved_host
+    resolved_host=$(grep -E "^$alias=" "$CONFIG_FILE" | cut -d'=' -f2)
+    
+    if [[ -n "$resolved_host" ]]; then
+      echo "$resolved_host"
+    else
+      echo "$alias"
+    fi
+  else
+    echo "$alias"
+  fi
+}
+
+transfer_files() {
+  local source_dir="$1"
+  local destination="$2"
+  local remote_dir="$3"
+  
+  echo "Transferring '$source_dir' to '$destination'..."
+  
+  rsync -avz --progress "$source_dir" "$destination:${remote_dir}"
+  
+  if [[ $? -eq 0 ]]; then
+    echo "Transfer completed successfully!"
+  else
+    error "File transfer failed."
+  fi
+}
+
+# Function for bash completion
+# teleport_bash_completion() {
+#   cat <<-'EOF'
+# _teleport_autocomplete() {
+#     local cur prev teleport_aliases
+#     cur="${COMP_WORDS[COMP_CWORD]}"
+#     prev="${COMP_WORDS[COMP_CWORD-1]}"
+#     CONFIG_FILE="$HOME/.teleport_hosts"
+
+#     if [[ "$prev" == "to" ]]; then
+#         if [[ -f "$CONFIG_FILE" ]]; then
+#             teleport_aliases=$(grep -E '^[^#]+' "$CONFIG_FILE" | cut -d'=' -f1)
+#         fi
+#         COMPREPLY=( $(compgen -W "$teleport_aliases" -- "$cur") )
+#     else
+#         COMPREPLY=( $(compgen -f -- "$cur") )
+#     fi
+# }
+
+# complete -F _teleport_autocomplete teleport
+# EOF
+# }
+
+teleport_zsh_completion() {
+  cat <<-'EOF'
+normalize_path() {
+    local path="$1"
+
+    if [[ "$path" == "/" ]]; then
+        echo "/"
+        return
+    fi
+
+    path="${path%/}"
+
+    IFS='/' read -r first second <<< "$path"
+
+    if [[ -n "$second" ]]; then
+        echo "$first/"
+    else
+        echo "$first"
+    fi
+}
+
+_teleport_autocomplete() {
+    local cur prev teleport_aliases
+    cur="${words[CURRENT]}"
+    prev="${words[CURRENT-1]}"
+    prevprev="${words[CURRENT-2]}"
+    CONFIG_FILE="$HOME/.teleport_hosts"
+
+    if [[ "$prev" == "in" ]]; then
+        remote_server=$(grep -E "^$prevprev=" "$CONFIG_FILE" | cut -d'=' -f2)
+        remote_path=${cur%/*}
+
+        remote_dirs=$(ssh "$remote_server" "find '$remote_path' -maxdepth 1 -type d 2>/dev/null" && printf '\0')
+        remote_dirs_array=("${(@f)remote_dirs}")
+
+        compadd -S "/" -- "${remote_dirs_array[@]}"
+
+    elif [[ "$prev" == "to" ]]; then
+        if [[ -f "$CONFIG_FILE" ]]; then
+            teleport_aliases=($(grep -E '^[^#]+' "$CONFIG_FILE" | cut -d'=' -f1))
+        fi
+        compadd "${teleport_aliases[@]}"
+    elif [[ "$prevprev" == "teleport" ]]; then
+        compadd "to"
+    elif [[ "$prevprev" == "to" ]]; then
+        compadd "in"
+    else
+        _files
+    fi
+}
+
+compdef _teleport_autocomplete teleport
+EOF
+}
+
+main() {
+  if [[ "$#" -ge 2 && "$1" == "completion" ]]; then
+    case "$2" in
+      zsh)
+        teleport_zsh_completion
+        exit 0
+        ;;
+      *)
+        echo "Unsupported shell. Use 'bash' or 'zsh'."
+        exit 1
+        ;;
+    esac
+  fi
+
+  check_rsync
+  validate_input "$@"
+  source_dir_or_file=$1
+  destination=$(resolve_alias "$3")
+  remote_dir=$4
+
+  if [[ ! "$destination" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+$ ]]; then
+    error "Invalid destination format. Expected format: user@host:path or host:path. Received: ${destination}:${path}"
+  fi
+
+  transfer_files "$source_dir_or_file" "$destination" "$remote_dir"
+}
+
+main "$@"
+
