@@ -59,10 +59,11 @@ transfer_files() {
   local source_dir="$1"
   local destination="$2"
   local remote_dir="$3"
+  local remote_server_port="$4"
   
   echo "Transferring '$source_dir' to '$destination'..."
   
-  rsync -avz --progress "$source_dir" "$destination:${remote_dir}"
+  rsync -avz -e "ssh -p ${remote_server_port}" --progress "$source_dir" "$destination:${remote_dir}"
   
   if [[ $? -eq 0 ]]; then
     echo "Transfer completed successfully!"
@@ -96,23 +97,8 @@ transfer_files() {
 
 teleport_zsh_completion() {
   cat <<-'EOF'
-normalize_path() {
-    local path="$1"
-
-    if [[ "$path" == "/" ]]; then
-        echo "/"
-        return
-    fi
-
-    path="${path%/}"
-
-    IFS='/' read -r first second <<< "$path"
-
-    if [[ -n "$second" ]]; then
-        echo "$first/"
-    else
-        echo "$first"
-    fi
+ping_server() {
+  ping -c1 -W1 -q "$1" > /dev/null 2>&1 && echo 'up' || echo 'down'
 }
 
 _teleport_autocomplete() {
@@ -123,18 +109,44 @@ _teleport_autocomplete() {
     CONFIG_FILE="$HOME/.teleport_hosts"
 
     if [[ "$prev" == "in" ]]; then
-        remote_server=$(grep -E "^$prevprev=" "$CONFIG_FILE" | cut -d'=' -f2)
+        if [[ -f "$CONFIG_FILE" ]]; then
+          local resolved_host
+          resolved_host=$(grep -E "^$prevprev=" "$CONFIG_FILE" | cut -d'=' -f2)
+          
+          if [[ -n "$resolved_host" ]]; then
+            remote_server="$resolved_host"
+          else
+            remote_server="$prevprev"
+          fi
+        else
+          remote_server="$prevprev"
+        fi
+
+        remote_server=$(echo "$remote_server" | awk -F ":" '{print $1}')
+
         remote_path=${cur%/*}
 
-        remote_dirs=$(ssh "$remote_server" "find '$remote_path' -maxdepth 1 -type d 2>/dev/null" && printf '\0')
-        remote_dirs_array=("${(@f)remote_dirs}")
+        # server_open=$(ping_server $(echo "$remote_server" | awk -F "@" '{print $2}'))
+        ip_address=$(echo "$remote_server" | awk -F "@" '{print $2}')
+        server_open=$(ping_server "$ip_address")
 
-        compadd -S "/" -- "${remote_dirs_array[@]}"
+        if [[ "$server_open" == "up" ]]; then
+          remote_dirs=$(ssh -o ConnectTimeout=1 "$remote_server" "find '$remote_path' -maxdepth 1 -type d 2>/dev/null" && printf '\0')
+          remote_dirs_array=("${(@f)remote_dirs}")
 
+          if [[ "$remote_path" == "/" || "$remote_path" == "" ]]; then
+            remote_dirs_array+=("/home")
+          fi
+          compadd -S "/" -- "${remote_dirs_array[@]}"
+        else
+          compadd "${remote_server} host is down"
+        fi
     elif [[ "$prev" == "to" ]]; then
         if [[ -f "$CONFIG_FILE" ]]; then
             teleport_aliases=($(grep -E '^[^#]+' "$CONFIG_FILE" | cut -d'=' -f1))
         fi
+        teleport_aliases+=("${USER}@")
+        teleport_aliases+=("root@")
         compadd "${teleport_aliases[@]}"
     elif [[ "$prevprev" == "teleport" ]]; then
         compadd "to"
@@ -166,14 +178,16 @@ main() {
   check_rsync
   validate_input "$@"
   source_dir_or_file=$1
-  destination=$(resolve_alias "$3")
-  remote_dir=$4
+  destination_and_port="$(resolve_alias "$3")"
+  destination=$(echo "$destination_and_port" | awk -F ":" '{print $1}')
+  remote_dir=$5
+  remote_server_port=$(echo "$destination_and_port" | awk -F ":" '{print $2}')
 
   if [[ ! "$destination" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+$ ]]; then
     error "Invalid destination format. Expected format: user@host:path or host:path. Received: ${destination}:${path}"
   fi
 
-  transfer_files "$source_dir_or_file" "$destination" "$remote_dir"
+  transfer_files "$source_dir_or_file" "$destination" "$remote_dir" "$remote_server_port"
 }
 
 main "$@"
